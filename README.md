@@ -5,23 +5,6 @@
 YouTube Video Transcription CLI Tool
 ====================================
 
-This Python script allows you to transcribe YouTube videos and save the transcription as a text file. The script uses the `youtube_transcript_api` library to retrieve the video transcript, the `deepmultilingualpunctuation` library to restore punctuation, and the `pytube` library to extract the video title.
-
-Requirements
-------------
-
--   Python 3.x
--   `youtube_transcript_api` library
--   `deepmultilingualpunctuation` library
--   `nltk` library
--   `pytube` library
-
-Installation
-------------
-
-1.  Clone the repository or download the `transcribe_cli.py` file.
-2.  Install the required libraries by running the following command:A command-line tool for transcribing YouTube videos and saving the transcriptions as formatted text files.
-
 ## Description
 -----------
 
