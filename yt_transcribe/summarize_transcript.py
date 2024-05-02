@@ -31,12 +31,12 @@ def split_text_into_chunks(text, chunk_size=2048):
 
     return chunks
 
-def generate_summaries(pipeline, dataloader):
+def generate_summaries(pipeline, chunks):
     summaries = []
-    for batch in dataloader:
+    for idx, chunk in enumerate(chunks, start=1):
         messages = [
             {"role": "system", "content": "You are a research assistant, finding the most useful insights for a book"},
-            {"role": "user", "content": f"<|start_header_id|>user<|end_header_id|>Create a summary capturing the main points and key details with headings and subheadings based on what you can understand and why it is relevant:\n\n{batch}<|eot_id|>"},
+            {"role": "user", "content": f"<|start_header_id|>user<|end_header_id|>Create a summary capturing the main points and key details with headings and subheadings based on what you can understand and why it is relevant:\n\n{chunk}<|eot_id|>"},
             {"role": "assistant", "content": "<|start_header_id|>assistant<|end_header_id|>"}
         ]
 
@@ -61,7 +61,8 @@ def generate_summaries(pipeline, dataloader):
         )
 
         summary = outputs[0]["generated_text"][len(prompt):].strip()
-        summaries.append(summary)
+        numbered_summary = f"Summary {idx}:\n{summary}"
+        summaries.append(numbered_summary)
 
     return summaries
 
@@ -85,9 +86,7 @@ def main():
     )
 
     chunks = split_text_into_chunks(input_text)
-    dataset = TextDataset(chunks)
-    dataloader = DataLoader(dataset, batch_size=8, num_workers=4)
-    summaries = generate_summaries(pipeline, dataloader)
+    summaries = generate_summaries(pipeline, chunks)
 
     os.makedirs('summaries', exist_ok=True)
 
