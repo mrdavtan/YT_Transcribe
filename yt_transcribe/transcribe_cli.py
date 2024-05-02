@@ -9,6 +9,45 @@ from nltk.tokenize import sent_tokenize
 from pytube import YouTube
 from datetime import datetime
 
+def text_to_paragraphs(text, max_sentences_per_paragraph=10, max_paragraph_length=300):
+    sentence_delimiters = [".", "!", "?"]
+    sentences = []
+    current_sentence = ""
+    paragraphs = []
+    current_paragraph = ""
+    paragraph_length = 0
+
+    for char in text:
+        current_sentence += char
+        if char in sentence_delimiters:
+            sentences.append(current_sentence)
+            current_sentence = ""
+
+    if current_sentence:
+        sentences.append(current_sentence)
+
+    for sentence in sentences:
+        sentence = sentence.strip()  # Remove leading/trailing whitespace and newlines
+        if sentence:
+            if current_paragraph:
+                if (paragraph_length + len(sentence) + 1 <= max_paragraph_length) and (
+                    len(current_paragraph.split(".")) < max_sentences_per_paragraph
+                ):
+                    current_paragraph += " "  # Add space between sentences
+                    current_paragraph += sentence
+                    paragraph_length += len(sentence) + 1  # +1 for the space
+                else:
+                    paragraphs.append(current_paragraph)
+                    current_paragraph = sentence
+                    paragraph_length = len(sentence)
+            else:
+                current_paragraph = sentence
+                paragraph_length = len(sentence)
+
+    if current_paragraph:
+        paragraphs.append(current_paragraph)
+
+    return paragraphs
 
 def main(url, language):
     try:
@@ -41,21 +80,12 @@ def main(url, language):
         capitalized_text = re.sub(r"\b(January|February|March|April|May|June|July|August|September|October|November|December)\b", lambda x: x.group().capitalize(), capitalized_text)
         capitalized_text = re.sub(r"\bi\b", "I", capitalized_text)
 
+        # Split the text into paragraphs
+        paragraphs = text_to_paragraphs(capitalized_text)
+
         # Extract the video title using pytube
         video = YouTube(url)
         video_title = video.title
-
-        # Replace any characters that are not alphanumeric, underscore, or space with an underscore
-        video_title = re.sub(r'[^a-zA-Z0-9_\s]', '_', video_title)
-
-        # Replace spaces with underscores in the video title
-        video_title = video_title.replace(" ", "_")
-
-        # Replace multiple consecutive underscores with a single underscore
-        video_title = re.sub(r'_+', '_', video_title)
-
-        # Remove any leading or trailing underscores
-        video_title = video_title.strip('_')
 
         # Get the current date in the format YYYYMMDD
         current_date = datetime.now().strftime("%Y%m%d")
@@ -63,9 +93,10 @@ def main(url, language):
         # Create the file name with the video title and current date
         file_name = f"{video_title}_{current_date}.txt"
 
-
         with open(file_name, "w") as f:
-            f.write(capitalized_text)
+            f.write(f"{video_title}\n\n")
+            for paragraph in paragraphs:
+                f.write(f"{paragraph}\n\n")
         print(f"Transcription saved as {file_name}")
     except NoTranscriptFound:
         print(f"No {language} transcript is available for this YouTube video.")
@@ -73,7 +104,6 @@ def main(url, language):
         print("Transcripts are disabled for this YouTube video.")
     except Exception as e:
         print(f"An error occurred: {str(e)}")
-
 
 if __name__ == "__main__":
     if len(sys.argv) != 3:
