@@ -2,17 +2,6 @@ import os
 import argparse
 import transformers
 import torch
-from torch.utils.data import Dataset, DataLoader
-
-class TextDataset(Dataset):
-    def __init__(self, chunks):
-        self.chunks = chunks
-
-    def __len__(self):
-        return len(self.chunks)
-
-    def __getitem__(self, idx):
-        return self.chunks[idx]
 
 def split_text_into_chunks(text, chunk_size=2048):
     paragraphs = text.split("\n\n")
