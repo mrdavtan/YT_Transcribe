@@ -101,6 +101,7 @@ if __name__ == "__main__":
     search_results = search_videos(search_terms)
 
     current_date = get_current_date()
-    output_file = f"{'_'.join(search_terms)}_{current_date}.json"
+    search_terms_underscored = [term.replace(" ", "_") for term in search_terms]
+    output_file = f"{('_'.join(search_terms_underscored))}_{current_date}.json"
     file_path = save_to_json(search_results, output_file)
     print(f"Search results saved to {file_path}")
