@@ -1,8 +1,18 @@
 import os
-import json
 import argparse
 import transformers
 import torch
+from torch.utils.data import Dataset, DataLoader
+
+class TextDataset(Dataset):
+    def __init__(self, chunks):
+        self.chunks = chunks
+
+    def __len__(self):
+        return len(self.chunks)
+
+    def __getitem__(self, idx):
+        return self.chunks[idx]
 
 def split_text_into_chunks(text, chunk_size=2048):
     paragraphs = text.split("\n\n")
@@ -21,35 +31,39 @@ def split_text_into_chunks(text, chunk_size=2048):
 
     return chunks
 
-def generate_summary(pipeline, text):
-    messages = [
-        {"role": "system", "content": "You are a research assistant, finding the most useful insights for a book"},
-        {"role": "user", "content": f"<|start_header_id|>user<|end_header_id|>Create a summary capturing the main points and key details with headings and subheadings based on what you can understand and why it is relevant:\n\n{text}<|eot_id|>"},
-        {"role": "assistant", "content": "<|start_header_id|>assistant<|end_header_id|>"}
-    ]
+def generate_summaries(pipeline, dataloader):
+    summaries = []
+    for batch in dataloader:
+        messages = [
+            {"role": "system", "content": "You are a research assistant, finding the most useful insights for a book"},
+            {"role": "user", "content": f"<|start_header_id|>user<|end_header_id|>Create a summary capturing the main points and key details with headings and subheadings based on what you can understand and why it is relevant:\n\n{batch}<|eot_id|>"},
+            {"role": "assistant", "content": "<|start_header_id|>assistant<|end_header_id|>"}
+        ]
 
-    prompt = pipeline.tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True
-    )
+        prompt = pipeline.tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True
+        )
 
-    terminators = [
-        pipeline.tokenizer.eos_token_id,
-        pipeline.tokenizer.convert_tokens_to_ids("<|end_of_text|>")
-    ]
+        terminators = [
+            pipeline.tokenizer.eos_token_id,
+            pipeline.tokenizer.convert_tokens_to_ids("<|end_of_text|>")
+        ]
 
-    outputs = pipeline(
-        prompt,
-        max_new_tokens=256,
-        eos_token_id=terminators,
-        do_sample=True,
-        temperature=0.6,
-        top_p=0.9,
-    )
+        outputs = pipeline(
+            prompt,
+            max_new_tokens=256,
+            eos_token_id=terminators,
+            do_sample=True,
+            temperature=0.6,
+            top_p=0.9,
+        )
 
-    summary = outputs[0]["generated_text"][len(prompt):].strip()
-    return summary
+        summary = outputs[0]["generated_text"][len(prompt):].strip()
+        summaries.append(summary)
+
+    return summaries
 
 def main():
     parser = argparse.ArgumentParser(description='Generate a summary from a text file using Meta Llama 3.')
@@ -71,20 +85,18 @@ def main():
     )
 
     chunks = split_text_into_chunks(input_text)
-    summaries = []
-
-    for chunk in chunks:
-        summary = generate_summary(pipeline, chunk)
-        summaries.append(summary)
+    dataset = TextDataset(chunks)
+    dataloader = DataLoader(dataset, batch_size=8, num_workers=4)
+    summaries = generate_summaries(pipeline, dataloader)
 
     os.makedirs('summaries', exist_ok=True)
 
     input_file_name = os.path.splitext(os.path.basename(args.input_file))[0]
-    output_file_name = f"{input_file_name}_summary.json"
+    output_file_name = f"{input_file_name}_summary.txt"
     output_file_path = os.path.join('summaries', output_file_name)
 
     with open(output_file_path, 'w') as file:
-        json.dump({"summaries": summaries}, file, indent=4)
+        file.write("\n\n".join(summaries))
 
     print(f"Summaries saved to: {output_file_path}")
 
