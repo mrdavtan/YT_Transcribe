@@ -8,6 +8,7 @@ import nltk
 from nltk.tokenize import sent_tokenize
 from pytube import YouTube
 from datetime import datetime
+import os
 
 def text_to_paragraphs(text, max_sentences_per_paragraph=10, max_paragraph_length=300):
     sentence_delimiters = [".", "!", "?"]
@@ -49,7 +50,13 @@ def text_to_paragraphs(text, max_sentences_per_paragraph=10, max_paragraph_lengt
 
     return paragraphs
 
-def main(url, language):
+def sanitize_filename(filename):
+    # Remove special characters and replace spaces with underscores
+    sanitized = re.sub(r'[^a-zA-Z0-9\s\-_]', '', filename)
+    sanitized = sanitized.replace(' ', '_')
+    return sanitized
+
+def main(url):
     try:
         parsed_url = urlparse(url)
         video_id = ""
@@ -59,7 +66,7 @@ def main(url, language):
         else:
             parsed_dict = parse_qs(parsed_url.query)
             video_id = parsed_dict["v"][0]
-        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=[language])
+        transcript = YouTubeTranscriptApi.get_transcript(video_id)
 
         # Concatenate the text of each segment
         transcript_text = " ".join([segment["text"] for segment in transcript])
@@ -87,29 +94,39 @@ def main(url, language):
         video = YouTube(url)
         video_title = video.title
 
+        # Sanitize the video title for the file name
+        sanitized_title = sanitize_filename(video_title)
+
         # Get the current date in the format YYYYMMDD
         current_date = datetime.now().strftime("%Y%m%d")
 
-        # Create the file name with the video title and current date
-        file_name = f"{video_title}_{current_date}.txt"
+        # Create the file name with the sanitized video title and current date
+        file_name = f"{sanitized_title}_{current_date}.txt"
 
-        with open(file_name, "w") as f:
+        # Check if the 'transcriptions' folder exists, and create it if it doesn't
+        transcriptions_folder = "transcriptions"
+        if not os.path.exists(transcriptions_folder):
+            os.makedirs(transcriptions_folder)
+
+        # Create the full file path for the transcription file
+        file_path = os.path.join(transcriptions_folder, file_name)
+
+        with open(file_path, "w") as f:
             f.write(f"{video_title}\n\n")
             for paragraph in paragraphs:
                 f.write(f"{paragraph}\n\n")
-        print(f"Transcription saved as {file_name}")
+        print(f"Transcription saved as {file_path}")
     except NoTranscriptFound:
-        print(f"No {language} transcript is available for this YouTube video.")
+        print("No transcript is available for this YouTube video.")
     except TranscriptsDisabled:
         print("Transcripts are disabled for this YouTube video.")
     except Exception as e:
         print(f"An error occurred: {str(e)}")
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        print("Usage: python transcribe_cli.py <youtube_url> <language>")
+    if len(sys.argv) != 2:
+        print("Usage: python transcribe_cli.py <youtube_url>")
         sys.exit(1)
 
     url = sys.argv[1]
-    language = sys.argv[2]
-    main(url, language)
+    main(url)
