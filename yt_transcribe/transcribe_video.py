@@ -9,6 +9,8 @@ from nltk.tokenize import sent_tokenize
 from pytube import YouTube
 from datetime import datetime
 import os
+import spacy
+
 
 def text_to_paragraphs(text, max_sentences_per_paragraph=10, max_paragraph_length=300):
     sentence_delimiters = [".", "!", "?"]
@@ -56,7 +58,13 @@ def sanitize_filename(filename):
     sanitized = sanitized.replace(' ', '_')
     return sanitized
 
-def main(url):
+
+def capitalize_names(text):
+    capitalized_text = re.sub(r"\b([A-Z][a-z]*(?:\s+[A-Z][a-z]*)+)\b", lambda x: x.group().title(), text)
+    return capitalized_text
+
+
+def main(url, max_segment_duration=600):  # Default segment duration of 10 minutes
     try:
         parsed_url = urlparse(url)
         video_id = ""
@@ -66,29 +74,6 @@ def main(url):
         else:
             parsed_dict = parse_qs(parsed_url.query)
             video_id = parsed_dict["v"][0]
-        transcript = YouTubeTranscriptApi.get_transcript(video_id)
-
-        # Concatenate the text of each segment
-        transcript_text = " ".join([segment["text"] for segment in transcript])
-
-        # Load the multilingual punctuation model
-        model = PunctuationModel()
-
-        # Restore punctuation in the text
-        punctuated_text = model.restore_punctuation(transcript_text)
-
-        # Capitalize the first letter of each sentence
-        sentences = sent_tokenize(punctuated_text)
-        capitalized_sentences = [sentence.capitalize() for sentence in sentences]
-        capitalized_text = " ".join(capitalized_sentences)
-
-        # Capitalize names, names of the month, and the pronoun "I"
-        capitalized_text = re.sub(r"\b(Stuart|Alexander|Bruce|Paul|Dimitri|Jared|Michael|Nassim|Brian)\b", lambda x: x.group().capitalize(), capitalized_text)
-        capitalized_text = re.sub(r"\b(January|February|March|April|May|June|July|August|September|October|November|December)\b", lambda x: x.group().capitalize(), capitalized_text)
-        capitalized_text = re.sub(r"\bi\b", "I", capitalized_text)
-
-        # Split the text into paragraphs
-        paragraphs = text_to_paragraphs(capitalized_text)
 
         # Extract the video title using pytube
         video = YouTube(url)
@@ -111,10 +96,52 @@ def main(url):
         # Create the full file path for the transcription file
         file_path = os.path.join(transcriptions_folder, file_name)
 
-        with open(file_path, "w") as f:
+        # Open the file in append mode
+        with open(file_path, "a") as f:
             f.write(f"{video_title}\n\n")
-            for paragraph in paragraphs:
-                f.write(f"{paragraph}\n\n")
+
+            # Get the video duration
+            video_duration = video.length
+
+            # Process the video in segments
+            start_time = 0
+            while start_time < video_duration:
+                end_time = min(start_time + max_segment_duration, video_duration)
+                transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
+                segment_transcript = [
+                    segment for segment in transcript
+                    if start_time <= segment['start'] < end_time
+                ]
+
+                # Process each segment of the transcript
+                for segment in segment_transcript:
+                    segment_start_time = segment['start']
+                    segment_text = segment['text']
+
+                    # Load the multilingual punctuation model
+                    model = PunctuationModel()
+
+                    # Restore punctuation in the text
+                    punctuated_text = model.restore_punctuation(segment_text)
+
+                    # Capitalize the first letter of each sentence
+                    sentences = sent_tokenize(punctuated_text)
+                    capitalized_sentences = [sentence.capitalize() for sentence in sentences]
+                    capitalized_text = " ".join(capitalized_sentences)
+
+                    # Capitalize names using the regular expression pattern
+                    capitalized_text = capitalize_names(capitalized_text)
+
+                    # Capitalize names of the month and the pronoun "I"
+                    capitalized_text = re.sub(r"\b(January|February|March|April|May|June|July|August|September|October|November|December)\b", lambda x: x.group().capitalize(), capitalized_text)
+                    capitalized_text = re.sub(r"\bi\b", "I", capitalized_text)
+
+                    # Write the timestamp and processed text to the file
+                    f.write(f"[{segment_start_time:.2f}] {capitalized_text}\n")
+
+                f.write("\n")
+                start_time = end_time
+
         print(f"Transcription saved as {file_path}")
     except NoTranscriptFound:
         print("No transcript is available for this YouTube video.")
@@ -122,6 +149,7 @@ def main(url):
         print("Transcripts are disabled for this YouTube video.")
     except Exception as e:
         print(f"An error occurred: {str(e)}")
+
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
