@@ -2,3 +2,8 @@ youtube-transcript-api==0.6.1
 pytube
 deepmultilingualpunctuation
 nltk
+--upgrade --no-deps --force-reinstall git+https://github.com/openai/whisper.git
+spacy
+ffmpeg
+tiktoken
+numba
