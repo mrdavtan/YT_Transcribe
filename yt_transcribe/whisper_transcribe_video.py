@@ -138,5 +138,11 @@ def main(url, timestamp_interval=30):
         traceback.print_exc()
 
 # Example usage
-url = "https://www.youtube.com/watch?v=T9Whccunka4"
-main(url)
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) != 2:
+        print("Usage: python whisper_transcribe_video.py <youtube_url>")
+        sys.exit(1)
+
+    url = sys.argv[1]
+    main(url)
