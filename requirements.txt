@@ -7,3 +7,4 @@ spacy
 ffmpeg
 tiktoken
 numba
+bert-extractive-summarizer
