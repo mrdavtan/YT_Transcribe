@@ -3,7 +3,7 @@ import argparse
 import transformers
 import torch
 
-def split_text_into_chunks(text, chunk_size=2048):
+def split_text_into_chunks(text, chunk_size=1024):
     paragraphs = text.split("\n\n")
     chunks = []
     current_chunk = []
@@ -67,14 +67,20 @@ def main():
     pipeline = transformers.pipeline(
         "text-generation",
         model=model_id,
+        tokenizer=model_id,
         model_kwargs={
             "torch_dtype": torch.float16,
             "quantization_config": {"load_in_4bit": True},
             "low_cpu_mem_usage": True,
         },
+        device_map="auto",
+        max_length=3000,
+        do_sample=True,
+        top_k=10,
+        num_return_sequences=1,
     )
 
-    chunks = split_text_into_chunks(input_text)
+    chunks = split_text_into_chunks(input_text, chunk_size=1024)
     summaries = generate_summaries(pipeline, chunks)
 
     os.makedirs('summaries', exist_ok=True)
