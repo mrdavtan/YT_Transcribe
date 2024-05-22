@@ -4,6 +4,7 @@ import whisper
 from pytube import YouTube
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs
+from pytube.exceptions import VideoUnavailable, RegexMatchError
 
 def sanitize_filename(filename):
     # Remove special characters and replace spaces with underscores
@@ -13,7 +14,7 @@ def sanitize_filename(filename):
 
 def capitalize_names(text):
     capitalized_text = re.sub(r"\b([A-Z][a-z]*(?:\s+[A-Z][a-z]*)+)\b", lambda x: x.group().title(), text)
-    return capitalized_text
+    return capitized_text
 
 def format_timestamp(seconds):
     minutes, seconds = divmod(seconds, 60)
@@ -79,8 +80,17 @@ def main(url, timestamp_interval=30):
 
         # Download the video
         print("Downloading video...")
-        video.streams.get_highest_resolution().download(output_path=videos_folder, filename=f"{sanitized_title}_{current_date}.mp4")
-        print("Video downloaded successfully.")
+        try:
+            video.streams.get_highest_resolution().download(output_path=videos_folder, filename=f"{sanitized_title}_{current_date}.mp4")
+            print("Video downloaded successfully.")
+        except AttributeError as e:
+            print(f"An error occurred while downloading the video: {str(e)}")
+            print("Skipping video download and proceeding with transcription.")
+            video_file_path = None
+        except (VideoUnavailable, RegexMatchError) as e:
+            print(f"An error occurred while accessing the video: {str(e)}")
+            print("Skipping video download and proceeding with transcription.")
+            video_file_path = None
 
         # Load the Whisper model
         model = whisper.load_model("base")
@@ -88,8 +98,12 @@ def main(url, timestamp_interval=30):
 
         # Transcribe the video using Whisper
         print("Transcribing video...")
-        result = model.transcribe(video_file_path)
-        print("Video transcription completed.")
+        if video_file_path:
+            result = model.transcribe(video_file_path)
+            print("Video transcription completed.")
+        else:
+            print("Video file not available. Skipping transcription.")
+            return
 
         # Process the transcription
         transcription = result["text"]
