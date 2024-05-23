@@ -1,10 +1,10 @@
 import re
 import os
 import whisper
-from pytube import YouTube
+import youtube_dl
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs
-from pytube.exceptions import VideoUnavailable, RegexMatchError
+from youtube_dl.utils import DownloadError
 
 def sanitize_filename(filename):
     # Remove special characters and replace spaces with underscores
@@ -14,7 +14,7 @@ def sanitize_filename(filename):
 
 def capitalize_names(text):
     capitalized_text = re.sub(r"\b([A-Z][a-z]*(?:\s+[A-Z][a-z]*)+)\b", lambda x: x.group().title(), text)
-    return capitized_text
+    return capitalized_text
 
 def format_timestamp(seconds):
     minutes, seconds = divmod(seconds, 60)
@@ -31,6 +31,20 @@ def extract_video_id(url):
         return parsed_url.path.strip("/")
     return None
 
+def download_video(url, output_path):
+    ydl_opts = {
+        'outtmpl': output_path,
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
+    }
+    try:
+        with youtube_dl.YoutubeDL(ydl_opts) as ydl:
+            info_dict = ydl.extract_info(url, download=True)
+            video_title = info_dict.get('title', None)
+    except DownloadError as e:
+        print(f"An error occurred while downloading the video: {str(e)}")
+        video_title = None
+    return video_title
+
 def main(url, timestamp_interval=30):
     try:
         print("Starting transcription process...")
@@ -41,18 +55,29 @@ def main(url, timestamp_interval=30):
             raise ValueError("Invalid YouTube video URL")
         print(f"Video ID: {video_id}")
 
-        # Create the YouTube object using the video ID
-        video_url = f"https://www.youtube.com/watch?v={video_id}"
-        video = YouTube(video_url)
-        video_title = video.title
+        # Get the current date in the format YYYYMMDD
+        current_date = datetime.now().strftime("%Y%m%d")
+
+        # Check if the 'videos' folder exists, and create it if it doesn't
+        videos_folder = "videos"
+        if not os.path.exists(videos_folder):
+            os.makedirs(videos_folder)
+            print(f"Created folder: {videos_folder}")
+
+        # Download the video using youtube-dl
+        print("Downloading video...")
+        video_file_path = os.path.join(videos_folder, f"video_{current_date}.mp4")
+        video_title = download_video(url, video_file_path)
+
+        if video_title is None:
+            print("Video download failed. Skipping transcription.")
+            return
+
         print(f"Video Title: {video_title}")
 
         # Sanitize the video title for the file name
         sanitized_title = sanitize_filename(video_title)
         print(f"Sanitized Title: {sanitized_title}")
-
-        # Get the current date in the format YYYYMMDD
-        current_date = datetime.now().strftime("%Y%m%d")
 
         # Create the file name with the sanitized video title and current date
         file_name = f"{sanitized_title}_{current_date}.txt"
@@ -68,42 +93,14 @@ def main(url, timestamp_interval=30):
         transcription_file_path = os.path.join(transcriptions_folder, file_name)
         print(f"Transcription File Path: {transcription_file_path}")
 
-        # Check if the 'videos' folder exists, and create it if it doesn't
-        videos_folder = "videos"
-        if not os.path.exists(videos_folder):
-            os.makedirs(videos_folder)
-            print(f"Created folder: {videos_folder}")
-
-        # Create the full file path for the video file
-        video_file_path = os.path.join(videos_folder, f"{sanitized_title}_{current_date}.mp4")
-        print(f"Video File Path: {video_file_path}")
-
-        # Download the video
-        print("Downloading video...")
-        try:
-            video.streams.get_highest_resolution().download(output_path=videos_folder, filename=f"{sanitized_title}_{current_date}.mp4")
-            print("Video downloaded successfully.")
-        except AttributeError as e:
-            print(f"An error occurred while downloading the video: {str(e)}")
-            print("Skipping video download and proceeding with transcription.")
-            video_file_path = None
-        except (VideoUnavailable, RegexMatchError) as e:
-            print(f"An error occurred while accessing the video: {str(e)}")
-            print("Skipping video download and proceeding with transcription.")
-            video_file_path = None
-
         # Load the Whisper model
         model = whisper.load_model("base")
         print("Whisper model loaded.")
 
         # Transcribe the video using Whisper
         print("Transcribing video...")
-        if video_file_path:
-            result = model.transcribe(video_file_path)
-            print("Video transcription completed.")
-        else:
-            print("Video file not available. Skipping transcription.")
-            return
+        result = model.transcribe(video_file_path)
+        print("Video transcription completed.")
 
         # Process the transcription
         transcription = result["text"]
