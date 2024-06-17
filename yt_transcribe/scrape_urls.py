@@ -10,19 +10,22 @@ url = sys.argv[1]
 
 session = requests.Session()
 
-login_url = 'https://dataaisummit.databricks.com/flow/db/dais2024/GVIR/login'
-login_data = {
-    'username': 'virtualpaul@gmail.com',
-    'password': 'MP24af@data'
-}
-response = session.post(login_url, data=login_data)
+try:
+    response = session.get(url)
+    print(f"Response status code: {response.status_code}")
 
-response = session.get(url)
+    soup = BeautifulSoup(response.content, 'html.parser')
+    links = soup.find_all('a', href=True)
+    print(f"Found {len(links)} links.")
 
-soup = BeautifulSoup(response.content, 'html.parser')
-youtube_links = soup.find_all('a', class_='youtube-link')
+    urls = [link['href'] for link in links]
 
-urls = [link['href'] for link in youtube_links]
+    print("Extracted URLs:")
+    for url in urls:
+        print(url)
 
-for url in urls:
-    print(url)
+except requests.exceptions.RequestException as e:
+    print(f"Error occurred during the request: {e}")
+
+except Exception as e:
+    print(f"An error occurred: {e}")
