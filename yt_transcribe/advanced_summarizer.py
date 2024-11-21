@@ -4,8 +4,10 @@ import transformers
 import torch
 from torch.utils.data import Dataset, DataLoader
 from datetime import datetime
+import gc
 from typing import List, Dict, Any
 import json
+
 
 class TextProcessor:
     def __init__(self, model_id="unsloth/llama-3-8b-Instruct-bnb-4bit"):
@@ -24,8 +26,15 @@ class TextProcessor:
             do_sample=True,
             top_p=0.9,
             temperature=0.6,
-            max_new_tokens=512,  # Increased for more detailed analysis
+            max_new_tokens=512,
         )
+
+    def _clear_memory(self):
+        """Clear GPU memory cache"""
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+        gc.collect()
 
     def _generate_response(self, prompt: str) -> str:
         """Generate response using the pipeline with proper templating"""
@@ -51,11 +60,17 @@ class TextProcessor:
             max_new_tokens=512,
             eos_token_id=terminators,
             do_sample=True,
-            temperature=0.7,  # Slightly higher for more creative analysis
+            temperature=0.7,
             top_p=0.9,
         )
 
-        return outputs[0]["generated_text"][len(formatted_prompt):].strip()
+        response = outputs[0]["generated_text"][len(formatted_prompt):].strip()
+
+        # Clear memory after generation
+        del outputs
+        self._clear_memory()
+
+        return response
 
     def generate_detailed_summary(self, text: str) -> str:
         """First pass: Generate detailed summary with timestamps and key points"""
@@ -66,6 +81,9 @@ class TextProcessor:
 
     def generate_bullet_points(self, text: str) -> str:
         """Second pass: Generate structured bullet points from the detailed summary"""
+        # Clear memory before starting
+        self._clear_memory()
+
         prompt = f"""Create a hierarchical bullet-point summary of the following text. Focus on:
 - Main themes and key insights
 - Supporting points and evidence
@@ -79,6 +97,9 @@ Format with clear headers and subpoints:
 
     def generate_analytical_report(self, original_text: str, detailed_summary: str, bullet_points: str) -> Dict[str, str]:
         """Third pass: Generate comprehensive analytical report"""
+        # Clear memory before starting
+        self._clear_memory()
+
         # Extract key insights
         prompt_insights = f"""Analyze these summaries to identify the 3-5 most valuable and unique insights. Consider:
 1. What makes these insights particularly valuable?
@@ -91,6 +112,7 @@ Text:
 Bullet Points:
 {bullet_points}"""
         key_insights = self._generate_response(prompt_insights)
+        self._clear_memory()
 
         # Generate executive summary
         prompt_exec_summary = f"""Create a compelling 500-word executive summary that:
@@ -101,6 +123,7 @@ Bullet Points:
 Base this on:
 {key_insights}"""
         executive_summary = self._generate_response(prompt_exec_summary)
+        self._clear_memory()
 
         # Generate full analysis
         prompt_analysis = f"""Create a comprehensive analysis that weaves together the most important points and insights. Include:
@@ -112,11 +135,11 @@ Base this on:
 6. Conclusion
 
 Use the following sources:
-Original Text: {original_text}
 Detailed Summary: {detailed_summary}
 Bullet Points: {bullet_points}
 Key Insights: {key_insights}"""
         full_analysis = self._generate_response(prompt_analysis)
+        self._clear_memory()
 
         return {
             "key_insights": key_insights,
@@ -163,17 +186,23 @@ def process_file(file_path: str, processor: TextProcessor, output_dir: str) -> N
     print("Generating detailed summary...")
     chunks = split_text_into_chunks(text)
     detailed_summaries = []
+
     for i, chunk in enumerate(chunks, 1):
         print(f"Processing chunk {i}/{len(chunks)}")
         summary = processor.generate_detailed_summary(chunk)
         detailed_summaries.append(summary)
+        # Clear memory after each chunk
+        processor._clear_memory()
+
     detailed_summary = "\n\n".join(detailed_summaries)
 
-    # Step 2: Generate bullet points from the detailed summary
+    # Clear memory before bullet points
+    processor._clear_memory()
     print("Generating bullet points...")
     bullet_points = processor.generate_bullet_points(detailed_summary)
 
-    # Step 3: Generate final analytical report
+    # Clear memory before final analysis
+    processor._clear_memory()
     print("Generating analytical report...")
     analysis = processor.generate_analytical_report(text, detailed_summary, bullet_points)
 
