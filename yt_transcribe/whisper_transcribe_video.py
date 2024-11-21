@@ -1,9 +1,9 @@
 import re
 import os
-import whisper
-from pytube import YouTube
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs
+import yt_dlp
+import whisper
 
 def sanitize_filename(filename):
     # Remove special characters and replace spaces with underscores
@@ -30,6 +30,40 @@ def extract_video_id(url):
         return parsed_url.path.strip("/")
     return None
 
+def get_video_info(url):
+    """
+    Get video information using yt-dlp
+    """
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'extract_flat': True,
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            return info
+    except Exception as e:
+        raise Exception(f"Failed to fetch video info: {str(e)}")
+
+def download_video(url, output_path):
+    """
+    Download video using yt-dlp
+    """
+    ydl_opts = {
+        'format': 'best[ext=mp4]',
+        'outtmpl': output_path,
+        'quiet': True,
+        'no_warnings': True,
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+    except Exception as e:
+        raise Exception(f"Failed to download video: {str(e)}")
+
 def main(url, timestamp_interval=30):
     try:
         print("Starting transcription process...")
@@ -40,10 +74,11 @@ def main(url, timestamp_interval=30):
             raise ValueError("Invalid YouTube video URL")
         print(f"Video ID: {video_id}")
 
-        # Create the YouTube object using the video ID
-        video_url = f"https://www.youtube.com/watch?v={video_id}"
-        video = YouTube(video_url)
-        video_title = video.title
+        # Get video info using yt-dlp
+        video_info = get_video_info(url)
+        video_title = video_info.get('title')
+        if not video_title:
+            raise ValueError("Could not fetch video title")
         print(f"Video Title: {video_title}")
 
         # Sanitize the video title for the file name
@@ -77,19 +112,25 @@ def main(url, timestamp_interval=30):
         video_file_path = os.path.join(videos_folder, f"{sanitized_title}_{current_date}.mp4")
         print(f"Video File Path: {video_file_path}")
 
-        # Download the video
+        # Download the video using yt-dlp
         print("Downloading video...")
-        video.streams.get_highest_resolution().download(output_path=videos_folder, filename=f"{sanitized_title}_{current_date}.mp4")
+        download_video(url, video_file_path)
         print("Video downloaded successfully.")
 
         # Load the Whisper model
-        model = whisper.load_model("base")
-        print("Whisper model loaded.")
+        try:
+            model = whisper.load_model("base")
+            print("Whisper model loaded.")
+        except Exception as e:
+            raise Exception(f"Failed to load Whisper model: {str(e)}")
 
         # Transcribe the video using Whisper
         print("Transcribing video...")
-        result = model.transcribe(video_file_path)
-        print("Video transcription completed.")
+        try:
+            result = model.transcribe(video_file_path)
+            print("Video transcription completed.")
+        except Exception as e:
+            raise Exception(f"Transcription failed: {str(e)}")
 
         # Process the transcription
         transcription = result["text"]
@@ -122,7 +163,7 @@ def main(url, timestamp_interval=30):
             segments.append((current_timestamp, current_segment))
 
         # Open the file in write mode
-        with open(transcription_file_path, "w") as f:
+        with open(transcription_file_path, "w", encoding='utf-8') as f:
             f.write(f"{video_title}\n\n")
 
             for timestamp, segment in segments:
@@ -146,3 +187,4 @@ if __name__ == "__main__":
 
     url = sys.argv[1]
     main(url)
+
