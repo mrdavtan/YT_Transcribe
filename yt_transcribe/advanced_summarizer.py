@@ -6,12 +6,29 @@ from torch.utils.data import Dataset, DataLoader
 from datetime import datetime
 import gc
 from typing import List, Dict, Any
-import json
+from tqdm import tqdm
+import logging
+from pathlib import Path
 
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('summarizer.log')
+    ]
+)
+logger = logging.getLogger(__name__)
+
+class ValidationError(Exception):
+    """Custom exception for validation errors"""
+    pass
 
 class TextProcessor:
-    def __init__(self, model_id="unsloth/llama-3-8b-Instruct-bnb-4bit"):
+    def __init__(self, model_id="unsloth/llama-3-8b-Instruct-bnb-4bit", chunk_size=2048):
         self.pipeline = self._initialize_pipeline(model_id)
+        self.chunk_size = chunk_size
 
     def _initialize_pipeline(self, model_id):
         return transformers.pipeline(
@@ -20,13 +37,13 @@ class TextProcessor:
             model_kwargs={
                 "torch_dtype": torch.bfloat16,
                 "low_cpu_mem_usage": True,
-                "use_cache": False,
+                "use_cache": True,
             },
             device_map="auto",
             do_sample=True,
-            top_p=0.9,
-            temperature=0.6,
-            max_new_tokens=512,
+            top_p=0.95,
+            temperature=0.7,
+            max_new_tokens=768,
         )
 
     def _clear_memory(self):
@@ -36,141 +53,89 @@ class TextProcessor:
             torch.cuda.ipc_collect()
         gc.collect()
 
-    def _generate_response(self, prompt: str) -> str:
-        """Generate response using the pipeline with proper templating"""
-        messages = [
-            {"role": "system", "content": "You are a research assistant, creating insightful analysis and summaries"},
-            {"role": "user", "content": f"<|start_header_id|>user<|end_header_id|>{prompt}<|eot_id|>"},
-            {"role": "assistant", "content": "<|start_header_id|>assistant<|end_header_id|>"}
-        ]
+    def _generate_response(self, prompt: str, desc: str = None) -> str:
+        """Generate response with proper error handling"""
+        try:
+            if desc:
+                logger.info(f"Generating: {desc}")
 
-        formatted_prompt = self.pipeline.tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True
-        )
+            messages = [
+                {"role": "system", "content": "You are a research assistant, creating insightful and concise analysis"},
+                {"role": "user", "content": f"<|start_header_id|>user<|end_header_id|>{prompt}<|eot_id|>"},
+                {"role": "assistant", "content": "<|start_header_id|>assistant<|end_header_id|>"}
+            ]
 
-        terminators = [
-            self.pipeline.tokenizer.eos_token_id,
-            self.pipeline.tokenizer.convert_tokens_to_ids("<|end_of_text|>")
-        ]
+            formatted_prompt = self.pipeline.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True
+            )
 
-        outputs = self.pipeline(
-            formatted_prompt,
-            max_new_tokens=512,
-            eos_token_id=terminators,
-            do_sample=True,
-            temperature=0.7,
-            top_p=0.9,
-        )
+            terminators = [
+                self.pipeline.tokenizer.eos_token_id,
+                self.pipeline.tokenizer.convert_tokens_to_ids("<|end_of_text|>")
+            ]
 
-        response = outputs[0]["generated_text"][len(formatted_prompt):].strip()
+            outputs = self.pipeline(
+                formatted_prompt,
+                max_new_tokens=768,
+                eos_token_id=terminators,
+                do_sample=True,
+                temperature=0.7,
+                top_p=0.95,
+                repetition_penalty=1.1,
+            )
 
-        # Clear memory after generation
-        del outputs
-        self._clear_memory()
+            response = outputs[0]["generated_text"][len(formatted_prompt):].strip()
 
-        return response
+            del outputs
+            self._clear_memory()
+
+            return response
+
+        except Exception as e:
+            logger.error(f"Error in generate_response: {str(e)}")
+            self._clear_memory()
+            raise
+
+    def split_text_into_chunks(self, text: str) -> List[str]:
+        """Split text into smaller chunks for processing"""
+        words = text.split()
+        chunks = []
+        current_chunk = []
+        current_length = 0
+
+        for word in words:
+            if current_length + len(word) > self.chunk_size:
+                chunks.append(" ".join(current_chunk))
+                current_chunk = [word]
+                current_length = len(word)
+            else:
+                current_chunk.append(word)
+                current_length += len(word)
+
+        if current_chunk:
+            chunks.append(" ".join(current_chunk))
+
+        return chunks
 
     def generate_detailed_summary(self, text: str) -> str:
-        """First pass: Generate detailed summary with timestamps and key points"""
-        prompt = f"""Create a detailed summary of the following text. Include key points, important quotes, and maintain any timestamp references. Focus on preserving the most valuable insights and concrete information:
+        """First pass: Generate focused, concise summary with timestamps"""
+        prompt = f"""Create a focused summary of the following text. Include only the most important points and essential quotes with their timestamps. Prioritize:
+1. Core arguments and main ideas
+2. Key statistics and facts
+3. Critical quotes (only the most impactful ones)
+4. Major theme transitions
+5. Significant conclusions
+
+Be concise and avoid redundancy. Skip tangential discussions and repeated points.
 
 {text}"""
         return self._generate_response(prompt)
 
-    def generate_bullet_points(self, text: str) -> str:
-        """Second pass: Generate structured bullet points from the detailed summary"""
-        # Clear memory before starting
-        self._clear_memory()
-
-        prompt = f"""Create a hierarchical bullet-point summary of the following text. Focus on:
-- Main themes and key insights
-- Supporting points and evidence
-- Unique or particularly valuable ideas
-- Practical applications or implications
-
-Format with clear headers and subpoints:
-
-{text}"""
-        return self._generate_response(prompt)
-
-    def generate_analytical_report(self, original_text: str, detailed_summary: str, bullet_points: str) -> Dict[str, str]:
-        """Third pass: Generate comprehensive analytical report"""
-        # Clear memory before starting
-        self._clear_memory()
-
-        # Extract key insights
-        prompt_insights = f"""Analyze these summaries to identify the 3-5 most valuable and unique insights. Consider:
-1. What makes these insights particularly valuable?
-2. How do they connect to broader themes?
-3. What practical implications do they have?
-
-Text:
-{detailed_summary}
-
-Bullet Points:
-{bullet_points}"""
-        key_insights = self._generate_response(prompt_insights)
-        self._clear_memory()
-
-        # Generate executive summary
-        prompt_exec_summary = f"""Create a compelling 500-word executive summary that:
-1. Introduces the main topic and its importance
-2. Highlights the key insights and their significance
-3. Provides a clear conclusion and implications
-
-Base this on:
-{key_insights}"""
-        executive_summary = self._generate_response(prompt_exec_summary)
-        self._clear_memory()
-
-        # Generate full analysis
-        prompt_analysis = f"""Create a comprehensive analysis that weaves together the most important points and insights. Include:
-1. Introduction
-2. Key themes and patterns
-3. Detailed discussion of main insights
-4. Supporting evidence and examples
-5. Implications and applications
-6. Conclusion
-
-Use the following sources:
-Detailed Summary: {detailed_summary}
-Bullet Points: {bullet_points}
-Key Insights: {key_insights}"""
-        full_analysis = self._generate_response(prompt_analysis)
-        self._clear_memory()
-
-        return {
-            "key_insights": key_insights,
-            "executive_summary": executive_summary,
-            "full_analysis": full_analysis
-        }
-
-def split_text_into_chunks(text: str, chunk_size: int = 1024) -> List[str]:
-    """Split text into manageable chunks while preserving paragraph structure"""
-    paragraphs = text.split('\n\n')
-    chunks = []
-    current_chunk = []
-    current_length = 0
-
-    for paragraph in paragraphs:
-        paragraph_length = len(paragraph)
-        if current_length + paragraph_length > chunk_size and current_chunk:
-            chunks.append('\n\n'.join(current_chunk))
-            current_chunk = []
-            current_length = 0
-        current_chunk.append(paragraph)
-        current_length += paragraph_length
-
-    if current_chunk:
-        chunks.append('\n\n'.join(current_chunk))
-
-    return chunks
-
-def process_file(file_path: str, processor: TextProcessor, output_dir: str) -> None:
-    """Process a single file through the multi-pass analysis pipeline"""
-    print(f"\nProcessing: {file_path}")
+def process_phase1(file_path: str, processor: TextProcessor, output_dir: str) -> str:
+    """Phase 1: Generate and save detailed summary"""
+    logger.info(f"\nPhase 1 - Detailed Summary: {file_path}")
 
     # Create output directory structure
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -178,85 +143,170 @@ def process_file(file_path: str, processor: TextProcessor, output_dir: str) -> N
     output_subdir = os.path.join(output_dir, f"{base_name}_{timestamp}")
     os.makedirs(output_subdir, exist_ok=True)
 
-    # Read and process the input file
-    with open(file_path, 'r') as f:
-        text = f.read()
+    try:
+        # Read the input file
+        with open(file_path, 'r') as f:
+            text = f.read()
 
-    # Step 1: Generate detailed summary
-    print("Generating detailed summary...")
-    chunks = split_text_into_chunks(text)
-    detailed_summaries = []
+        # Process chunks and generate detailed summary
+        logger.info("Generating focused summary...")
+        chunks = processor.split_text_into_chunks(text)
+        detailed_summaries = []
 
-    for i, chunk in enumerate(chunks, 1):
-        print(f"Processing chunk {i}/{len(chunks)}")
-        summary = processor.generate_detailed_summary(chunk)
-        detailed_summaries.append(summary)
-        # Clear memory after each chunk
+        for i, chunk in enumerate(tqdm(chunks, desc="Processing chunks")):
+            summary = processor.generate_detailed_summary(chunk)
+            detailed_summaries.append(summary)
+            processor._clear_memory()
+
+        # Combine summaries and save
+        detailed_summary = "\n\n".join(detailed_summaries)
+        summary_path = os.path.join(output_subdir, "detailed_summary.txt")
+
+        with open(summary_path, 'w') as f:
+            f.write(detailed_summary)
+
+        # Save phase completion marker
+        with open(os.path.join(output_subdir, "phase1_complete"), 'w') as f:
+            f.write(datetime.now().isoformat())
+
+        logger.info(f"Phase 1 complete. Summary saved to: {summary_path}")
+        return output_subdir
+
+    except Exception as e:
+        logger.error(f"Error in Phase 1: {str(e)}")
+        raise
+
+def process_phase2(output_dir: str, processor: TextProcessor) -> None:
+    """Phase 2: Generate bullet points and analysis from saved summary"""
+    logger.info("\nPhase 2 - Analysis Generation")
+
+    # Verify Phase 1 completion
+    if not os.path.exists(os.path.join(output_dir, "phase1_complete")):
+        raise ValidationError("Phase 1 must be completed before running Phase 2")
+
+    try:
+        # Load the detailed summary
+        summary_path = os.path.join(output_dir, "detailed_summary.txt")
+        with open(summary_path, 'r') as f:
+            detailed_summary = f.read()
+
+        # Clear memory before starting Phase 2
         processor._clear_memory()
 
-    detailed_summary = "\n\n".join(detailed_summaries)
+        # Generate bullet points
+        logger.info("Generating bullet points...")
+        prompt = f"""Create a comprehensive, hierarchical bullet-point summary focusing on:
+- Main themes and key insights
+- Supporting points and evidence
+- Unique or particularly valuable ideas
+- Practical applications or implications
 
-    # Clear memory before bullet points
-    processor._clear_memory()
-    print("Generating bullet points...")
-    bullet_points = processor.generate_bullet_points(detailed_summary)
+{detailed_summary}"""
 
-    # Clear memory before final analysis
-    processor._clear_memory()
-    print("Generating analytical report...")
-    analysis = processor.generate_analytical_report(text, detailed_summary, bullet_points)
+        bullet_points = processor._generate_response(prompt, "Generating bullet points")
+        processor._clear_memory()
 
-    # Save all outputs
-    outputs = {
-        "detailed_summary.txt": detailed_summary,
-        "bullet_points.txt": bullet_points,
-        "key_insights.txt": analysis["key_insights"],
-        "executive_summary.txt": analysis["executive_summary"],
-        "full_analysis.txt": analysis["full_analysis"]
-    }
+        # Save bullet points
+        with open(os.path.join(output_dir, "bullet_points.txt"), 'w') as f:
+            f.write(bullet_points)
 
-    # Create index file
-    index_content = f"""Analysis Index
+        # Generate key insights
+        logger.info("Generating key insights...")
+        insights_prompt = f"""Analyze these bullet points to identify the 3-5 most valuable insights:
+
+{bullet_points}"""
+
+        key_insights = processor._generate_response(insights_prompt, "Generating key insights")
+        processor._clear_memory()
+
+        # Save key insights
+        with open(os.path.join(output_dir, "key_insights.txt"), 'w') as f:
+            f.write(key_insights)
+
+        # Generate executive summary
+        logger.info("Generating executive summary...")
+        exec_prompt = f"""Create a compelling 500-word executive summary based on these key insights:
+
+{key_insights}"""
+
+        exec_summary = processor._generate_response(exec_prompt, "Generating executive summary")
+        processor._clear_memory()
+
+        # Save executive summary
+        with open(os.path.join(output_dir, "executive_summary.txt"), 'w') as f:
+            f.write(exec_summary)
+
+        # Generate final analysis
+        logger.info("Generating final analysis...")
+        analysis_prompt = f"""Create a comprehensive analysis combining these elements:
+
+Key Insights:
+{key_insights}
+
+Bullet Points:
+{bullet_points}"""
+
+        final_analysis = processor._generate_response(analysis_prompt, "Generating final analysis")
+
+        # Save final analysis
+        with open(os.path.join(output_dir, "final_analysis.txt"), 'w') as f:
+            f.write(final_analysis)
+
+        # Create index file
+        index_content = f"""Analysis Index
 Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
-1. executive_summary.txt - 500-word overview of key findings
-2. key_insights.txt - Core insights and their significance
-3. bullet_points.txt - Hierarchical summary of main points
-4. detailed_summary.txt - Comprehensive summary with timestamps
-5. full_analysis.txt - Complete analytical report
+1. executive_summary.txt - 500-word overview
+2. key_insights.txt - Core insights
+3. bullet_points.txt - Structured summary
+4. detailed_summary.txt - Full summary with timestamps
+5. final_analysis.txt - Complete analysis"""
 
-Original file: {file_path}"""
+        with open(os.path.join(output_dir, "index.txt"), 'w') as f:
+            f.write(index_content)
 
-    outputs["index.txt"] = index_content
+        # Save phase completion marker
+        with open(os.path.join(output_dir, "phase2_complete"), 'w') as f:
+            f.write(datetime.now().isoformat())
 
-    # Save all files
-    for filename, content in outputs.items():
-        output_path = os.path.join(output_subdir, filename)
-        with open(output_path, 'w') as f:
-            f.write(content)
+        logger.info(f"Phase 2 complete. All analyses saved in: {output_dir}")
 
-    print(f"Analysis complete. Output saved to: {output_subdir}")
+    except Exception as e:
+        logger.error(f"Error in Phase 2: {str(e)}")
+        raise
 
 def main():
-    parser = argparse.ArgumentParser(description='Advanced multi-pass text analysis pipeline')
-    input_group = parser.add_mutually_exclusive_group(required=True)
-    input_group.add_argument('-f', '--file', help='Path to a single input text file')
-    input_group.add_argument('-d', '--directory', help='Path to directory containing multiple text files')
+    parser = argparse.ArgumentParser(description='Phase-based text analysis pipeline')
+    parser.add_argument('-f', '--file', help='Path to input text file', required=True)
     parser.add_argument('-o', '--output-dir', default='analysis_output',
                        help='Output directory for analysis (default: analysis_output)')
+    parser.add_argument('--phase', type=int, choices=[1, 2],
+                       help='Specific phase to run (1=detailed summary, 2=analysis)')
+    parser.add_argument('--analysis-dir',
+                       help='Directory containing phase 1 output (required for phase 2)')
+    parser.add_argument('--chunk-size', type=int, default=2048,
+                       help='Size of text chunks for processing (default: 2048)')
 
     args = parser.parse_args()
 
-    os.makedirs(args.output_dir, exist_ok=True)
-    processor = TextProcessor()
+    try:
+        os.makedirs(args.output_dir, exist_ok=True)
+        processor = TextProcessor(chunk_size=args.chunk_size)
 
-    if args.file:
-        process_file(args.file, processor, args.output_dir)
-    else:
-        for filename in os.listdir(args.directory):
-            if filename.endswith('.txt'):
-                file_path = os.path.join(args.directory, filename)
-                process_file(file_path, processor, args.output_dir)
+        if not args.phase or args.phase == 1:
+            output_dir = process_phase1(args.file, processor, args.output_dir)
+            if not args.phase:  # If no specific phase specified, continue to phase 2
+                process_phase2(output_dir, processor)
+        elif args.phase == 2:
+            if not args.analysis_dir:
+                raise ValueError("--analysis-dir is required for phase 2")
+            process_phase2(args.analysis_dir, processor)
+
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
+        raise
+    finally:
+        processor._clear_memory()
 
 if __name__ == "__main__":
     main()
