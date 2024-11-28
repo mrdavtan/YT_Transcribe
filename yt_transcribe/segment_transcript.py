@@ -6,26 +6,40 @@ import json
 import logging
 from pathlib import Path
 from datetime import datetime
-from typing import List, Dict
+from typing import List, Dict, Optional
+from dataclasses import dataclass
 import gc
-from tqdm import tqdm
 
-# Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('segmentation.log')
-    ]
-)
-logger = logging.getLogger(__name__)
+@dataclass
+class TopicSegment:
+    start_pos: int
+    end_pos: int
+    start_time: Optional[str]
+    end_time: Optional[str]
+    topic: str
+    subtopics: List[str]
+    key_points: List[str]
+    importance: str
+    references: List[Dict[str, str]]  # Track cross-references to other segments
 
 class TopicSegmenter:
-    def __init__(self, model_id="unsloth/llama-3-8b-Instruct-bnb-4bit"):
+    def __init__(self, model_id: str = "unsloth/llama-3-8b-Instruct-bnb-4bit",
+                 window_size: int = 4000, overlap: int = 800):
+        self.window_size = window_size
+        self.overlap = overlap
         self.pipeline = self._initialize_pipeline(model_id)
+        self._setup_logging()
 
-    def _initialize_pipeline(self, model_id):
+    def _setup_logging(self):
+        self.logger = logging.getLogger(__name__)
+        if not self.logger.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+            handler.setFormatter(formatter)
+            self.logger.addHandler(handler)
+            self.logger.setLevel(logging.INFO)
+
+    def _initialize_pipeline(self, model_id: str):
         return transformers.pipeline(
             "text-generation",
             model=model_id,
@@ -38,207 +52,157 @@ class TopicSegmenter:
             do_sample=True,
             top_p=0.95,
             temperature=0.7,
-            max_new_tokens=768,
+            max_new_tokens=512  # Reduced to help with memory
         )
 
     def _clear_memory(self):
-        """Clear GPU memory cache"""
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
         gc.collect()
 
-    def _generate_response(self, prompt: str, desc: str = None) -> str:
-        """Generate response with proper error handling"""
+    def _extract_json_safely(self, text: str) -> Optional[Dict]:
+        """Extract JSON from LLM response with fallback parsing"""
         try:
-            if desc:
-                logger.info(f"Generating: {desc}")
+            # Try to find JSON block
+            start_idx = text.find('{')
+            end_idx = text.rfind('}')
+            if start_idx != -1 and end_idx != -1:
+                json_str = text[start_idx:end_idx + 1]
+                return json.loads(json_str)
+        except json.JSONDecodeError:
+            self.logger.warning("Failed to parse JSON response")
+            return None
 
-            messages = [
-                {"role": "system", "content": "You are a research assistant, analyzing conversation transcripts and identifying topic changes and themes."},
-                {"role": "user", "content": f"<|start_header_id|>user<|end_header_id|>{prompt}<|eot_id|>"},
-                {"role": "assistant", "content": "<|start_header_id|>assistant<|end_header_id|>"}
-            ]
+    def _generate_segment_analysis(self, text: str, context: Optional[Dict] = None) -> Optional[Dict]:
+        prompt = f"""Analyze this transcript segment and identify the main topic and key points.
+Return only a JSON object with this structure:
+{{
+    "topic": "Clear topic title",
+    "start_time": "HH:MM:SS if present, else null",
+    "end_time": "HH:MM:SS if present, else null",
+    "key_points": ["Main point 1", "Main point 2"],
+    "subtopics": ["Subtopic 1", "Subtopic 2"],
+    "importance": "High/Medium/Low",
+    "references_previous": "Brief note if references earlier content",
+    "continues_next": boolean
+}}
 
-            formatted_prompt = self.pipeline.tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True
-            )
+Transcript text:
+{text}
 
-            outputs = self.pipeline(
-                formatted_prompt,
-                max_new_tokens=768,
-                do_sample=True,
-                temperature=0.7,
-                top_p=0.95,
-            )
-
-            response = outputs[0]["generated_text"][len(formatted_prompt):].strip()
-
-            del outputs
-            self._clear_memory()
-
-            return response
+Previous topic (if any): {context.get('prev_topic') if context else 'None'}
+"""
+        try:
+            response = self.pipeline(prompt)[0]['generated_text']
+            return self._extract_json_safely(response)
         except Exception as e:
-            logger.error(f"Error in generate_response: {str(e)}")
-            self._clear_memory()
-            raise
+            self.logger.error(f"Generation error: {str(e)}")
+            return None
 
-    def identify_topic_segments(self, text: str, window_size: int = 5000) -> List[Dict]:
-        """Identify major topic segments in the text using a sliding window approach"""
+    def segment_transcript(self, transcript: str) -> List[TopicSegment]:
         segments = []
         current_pos = 0
-        overlap = 1000  # Overlap between windows to maintain context
+        prev_context = None
 
-        logger.info("Identifying topic segments...")
+        while current_pos < len(transcript):
+            window_end = min(current_pos + self.window_size, len(transcript))
+            window_text = transcript[current_pos:window_end]
 
-        while current_pos < len(text):
-            # Get current window of text with overlap
-            window_end = min(current_pos + window_size, len(text))
-            window_text = text[current_pos:window_end]
+            # Analyze current window
+            result = self._generate_segment_analysis(
+                window_text,
+                context=prev_context
+            )
 
-            # Create prompt for topic identification
-            prompt = f"""Analyze this segment of a conversation transcript and identify the major topic or topics being discussed.
-Focus on clear topic transitions and thematic changes.
+            if result:
+                segment = TopicSegment(
+                    start_pos=current_pos,
+                    end_pos=window_end,
+                    start_time=result.get('start_time'),
+                    end_time=result.get('end_time'),
+                    topic=result['topic'],
+                    subtopics=result.get('subtopics', []),
+                    key_points=result.get('key_points', []),
+                    importance=result.get('importance', 'Medium'),
+                    references=[]
+                )
+                segments.append(segment)
 
-For each identified topic segment, provide:
-1. The timestamp range where it appears (if timestamps are present)
-2. A clear, specific topic title
-3. Key speakers or main points discussed
-4. Importance level (High/Medium/Low) based on content significance
+                prev_context = {
+                    'prev_topic': result['topic'],
+                    'references_previous': result.get('references_previous'),
+                    'continues_next': result.get('continues_next', False)
+                }
 
-Format as JSON with these fields:
-- start_time: timestamp or "continuing"
-- end_time: timestamp or "continues"
-- topic: clear title
-- subtopics: list of specific points
-- key_speakers: list of speakers
-- importance: "High"/"Medium"/"Low"
-- key_points: list of main points
-- continues_previous: true/false
-- continues_next: true/false
+            # Advance window with overlap
+            current_pos = window_end - self.overlap
+            self._clear_memory()
 
-Transcript segment:
-{window_text}"""
+        return self._post_process_segments(segments)
 
-            # Generate and parse response
-            response = self._generate_response(prompt, f"Processing window {current_pos}-{window_end}")
+    def _post_process_segments(self, segments: List[TopicSegment]) -> List[TopicSegment]:
+        """Connect related segments and identify cross-references"""
+        for i, segment in enumerate(segments):
+            # Look for topic continuations
+            if i > 0 and segments[i-1].topic == segment.topic:
+                segment.start_pos = segments[i-1].start_pos
+                segments[i-1] = segment
 
-            try:
-                # Extract JSON from response (might need cleaning/parsing)
-                segments_data = json.loads(response)
-                segments.extend(segments_data if isinstance(segments_data, list) else [segments_data])
-            except json.JSONDecodeError:
-                logger.warning(f"Could not parse JSON from response at position {current_pos}. Skipping.")
+            # Track cross-references
+            for point in segment.key_points:
+                for other_segment in segments[:i]:
+                    if any(p.lower() in point.lower() for p in other_segment.key_points):
+                        segment.references.append({
+                            'topic': other_segment.topic,
+                            'point': point
+                        })
 
-            # Move window forward with overlap
-            current_pos = window_end - overlap
-            if current_pos < 0:
-                break
+        return [s for i, s in enumerate(segments)
+                if i == 0 or s.topic != segments[i-1].topic]
 
-        return self._consolidate_segments(segments)
+    def save_analysis(self, segments: List[TopicSegment], output_dir: Path):
+        """Save segmentation results with cross-reference tracking"""
+        output_dir.mkdir(parents=True, exist_ok=True)
 
-    def _consolidate_segments(self, segments: List[Dict]) -> List[Dict]:
-        """Consolidate overlapping segments and clean up transitions"""
-        consolidated = []
-        current_segment = None
+        # Save detailed analysis
+        analysis_path = output_dir / "topic_analysis.json"
+        with analysis_path.open('w') as f:
+            json.dump([{
+                'topic': s.topic,
+                'time_range': f"{s.start_time or 'start'} - {s.end_time or 'end'}",
+                'key_points': s.key_points,
+                'subtopics': s.subtopics,
+                'importance': s.importance,
+                'references': s.references
+            } for s in segments], f, indent=2)
 
-        for segment in segments:
-            if not current_segment:
-                current_segment = segment
-                continue
+        # Save topic overview
+        overview_path = output_dir / "topic_overview.txt"
+        with overview_path.open('w') as f:
+            for segment in segments:
+                f.write(f"\n{segment.topic}\n{'='*len(segment.topic)}\n")
+                f.write(f"Time: {segment.start_time or 'start'} - {segment.end_time or 'end'}\n")
+                f.write(f"Importance: {segment.importance}\n\n")
 
-            # Check if segments should be merged
-            if (segment.get('continues_previous') and
-                current_segment.get('continues_next')):
-                # Merge segments
-                current_segment['end_time'] = segment['end_time']
-                current_segment['subtopics'].extend(segment['subtopics'])
-                current_segment['key_points'].extend(segment['key_points'])
-            else:
-                consolidated.append(current_segment)
-                current_segment = segment
-
-        if current_segment:
-            consolidated.append(current_segment)
-
-        return consolidated
-
-def process_transcript(file_path: str, output_dir: str) -> None:
-    """Process a transcript file and generate topic segments"""
-    logger.info(f"Processing transcript: {file_path}")
-
-    # Create output directory
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base_name = os.path.splitext(os.path.basename(file_path))[0]
-    output_subdir = os.path.join(output_dir, f"{base_name}_segments_{timestamp}")
-    os.makedirs(output_subdir, exist_ok=True)
-
-    try:
-        # Read transcript
-        with open(file_path, 'r') as f:
-            transcript = f.read()
-
-        # Initialize segmenter
-        segmenter = TopicSegmenter()
-
-        # Identify topics
-        segments = segmenter.identify_topic_segments(transcript)
-
-        # Save topic metadata
-        metadata_path = os.path.join(output_subdir, "topic_metadata.json")
-        with open(metadata_path, 'w') as f:
-            json.dump({
-                "original_file": file_path,
-                "timestamp": timestamp,
-                "segments": segments
-            }, f, indent=2)
-
-        # Create individual segment files
-        for i, segment in enumerate(segments, 1):
-            segment_file = os.path.join(output_subdir, f"segment_{i:03d}.txt")
-            with open(segment_file, 'w') as f:
-                f.write(f"Topic: {segment['topic']}\n")
-                f.write(f"Timestamps: {segment['start_time']} - {segment['end_time']}\n")
-                f.write(f"Importance: {segment['importance']}\n")
-                f.write("\nKey Points:\n")
-                for point in segment['key_points']:
-                    f.write(f"- {point}\n")
-                f.write("\nSubtopics:\n")
-                for subtopic in segment['subtopics']:
-                    f.write(f"- {subtopic}\n")
-
-        # Create topic index
-        index_path = os.path.join(output_subdir, "topic_index.txt")
-        with open(index_path, 'w') as f:
-            f.write("Topic Index\n")
-            f.write("=" * 50 + "\n\n")
-            for i, segment in enumerate(segments, 1):
-                f.write(f"{i:03d}. {segment['topic']}\n")
-                f.write(f"    Time: {segment['start_time']} - {segment['end_time']}\n")
-                f.write(f"    Importance: {segment['importance']}\n\n")
-
-        logger.info(f"Segmentation complete. Output saved to: {output_subdir}")
-
-    except Exception as e:
-        logger.error(f"Error processing transcript: {str(e)}")
-        raise
+                if segment.references:
+                    f.write("References to earlier topics:\n")
+                    for ref in segment.references:
+                        f.write(f"- {ref['topic']}: {ref['point']}\n")
+                f.write("\n")
 
 def main():
-    parser = argparse.ArgumentParser(description='Segment transcript into topic-based chunks')
-    parser.add_argument('-f', '--file', help='Path to transcript file', required=True)
-    parser.add_argument('-o', '--output-dir', default='segmented_transcripts',
-                       help='Output directory (default: segmented_transcripts)')
-
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-f', '--file', required=True, help='Transcript file')
+    parser.add_argument('-o', '--output-dir', default='segment_analysis')
     args = parser.parse_args()
 
-    try:
-        os.makedirs(args.output_dir, exist_ok=True)
-        process_transcript(args.file, args.output_dir)
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
-        raise
+    segmenter = TopicSegmenter()
+    with open(args.file) as f:
+        transcript = f.read()
+
+    segments = segmenter.segment_transcript(transcript)
+    segmenter.save_analysis(segments, Path(args.output_dir))
 
 if __name__ == "__main__":
     main()
