@@ -1,5 +1,4 @@
 youtube-transcript-api==0.6.1
-pytube
 deepmultilingualpunctuation
 nltk
 --upgrade --no-deps --force-reinstall git+https://github.com/openai/whisper.git
@@ -8,3 +7,6 @@ ffmpeg
 tiktoken
 numba
 bert-extractive-summarizer
+librosa
+pydub
+numpy
