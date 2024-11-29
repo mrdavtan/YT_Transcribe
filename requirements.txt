@@ -1,3 +1,4 @@
+python-dotenv
 youtube-transcript-api==0.6.1
 pytube
 deepmultilingualpunctuation
@@ -8,3 +9,6 @@ ffmpeg
 tiktoken
 numba
 bert-extractive-summarizer
+pyannote.audio
+numpy
+huggingface_hub
