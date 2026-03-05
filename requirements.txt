@@ -12,3 +12,5 @@ bert-extractive-summarizer
 pyannote.audio
 numpy
 huggingface_hub
+moviepy
+tqdm decorator

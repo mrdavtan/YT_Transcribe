@@ -5,16 +5,18 @@ import yt_dlp
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs
 import argparse
+import subprocess
+from tqdm import tqdm
+from pyannote.audio import Pipeline
+import torch
+from dotenv import load_dotenv
+from moviepy import VideoFileClip
+
 
 def sanitize_filename(filename):
-    # Remove special characters and replace spaces with underscores
     sanitized = re.sub(r'[^a-zA-Z0-9\s\-_]', '', filename)
     sanitized = sanitized.replace(' ', '_')
     return sanitized
-
-def capitalize_names(text):
-    capitalized_text = re.sub(r"\b([A-Z][a-z]*(?:\s+[A-Z][a-z]*)+)\b", lambda x: x.group().title(), text)
-    return capitalized_text
 
 def format_timestamp(seconds):
     minutes, seconds = divmod(seconds, 60)
@@ -31,93 +33,189 @@ def extract_video_id(url):
         return parsed_url.path.strip("/")
     return None
 
+def check_video_exists(video_id):
+    videos_dir = "videos"
+    if os.path.exists(videos_dir):
+        for video_file in os.listdir(videos_dir):
+            if video_id in video_file:
+                return os.path.join(videos_dir, video_file)
+    return None
+
+class ProgressBar:
+    def __init__(self, total):
+        self.pbar = tqdm(total=total, unit='B', unit_scale=True)
+
+    def update(self, count):
+        self.pbar.update(count)
+
+    def close(self):
+        self.pbar.close()
+
+def download_video(url, video_path):
+    progress_bar = None
+
+    def progress_hook(d):
+        nonlocal progress_bar
+        if d['status'] == 'downloading':
+            if progress_bar is None and 'total_bytes' in d:
+                progress_bar = ProgressBar(d['total_bytes'])
+            if progress_bar and 'downloaded_bytes' in d:
+                progress_bar.update(d['downloaded_bytes'] - progress_bar.pbar.n)
+        elif d['status'] == 'finished' and progress_bar:
+            progress_bar.close()
+
+    ydl_opts = {
+        'format': 'best',
+        'outtmpl': video_path,
+        'quiet': True,
+        'no_warnings': True,
+        'progress_hooks': [progress_hook],
+    }
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        try:
+            info = ydl.extract_info(url, download=True)
+            return info.get('title', None)
+        except Exception as e:
+            print(f"Error downloading video: {str(e)}")
+            return None
+
+def convert_to_wav(video_path):
+    wav_path = video_path.rsplit('.', 1)[0] + '.wav'
+    if not os.path.exists(wav_path):
+        video = VideoFileClip(video_path)
+        audio = video.audio
+        audio.write_audiofile(wav_path)
+        video.close()
+    return wav_path
+
+def get_speaker_diarization(audio_path):
+    wav_path = convert_to_wav(audio_path)
+    pipeline = Pipeline.from_pretrained(
+        "pyannote/speaker-diarization",
+        use_auth_token=os.getenv('HUGGINGFACE_TOKEN')
+    )
+    diarization = pipeline(wav_path)
+
+    segments = []
+    for turn, _, speaker in diarization.itertracks():
+        segments.append({
+            'start': turn.start,
+            'end': turn.end,
+            'speaker': speaker
+        })
+    return segments
+
+def assign_speakers_to_transcript(transcript_segments, diarization_segments):
+    for t_segment in transcript_segments:
+        start_time = t_segment['start']
+        for d_segment in diarization_segments:
+            if d_segment['start'] <= start_time <= d_segment['end']:
+                t_segment['speaker'] = d_segment['speaker']
+                break
+    return transcript_segments
+
+def is_sentence_end(text):
+    return bool(re.search(r'[.!?][\s"]*$', text.strip()))
+
 def main(url):
     try:
         print("Starting transcription process...")
-
-        # Extract the video ID from the URL
         video_id = extract_video_id(url)
         if not video_id:
             raise ValueError("Invalid YouTube video URL")
         print(f"Video ID: {video_id}")
 
-        # Get video info using yt-dlp
-        with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
-            video_info = ydl.extract_info(url, download=False)
-            video_title = video_info['title']
-        print(f"Video Title: {video_title}")
+        existing_video = check_video_exists(video_id)
+        if existing_video:
+            print(f"Video already exists: {existing_video}")
+            video_file_path = existing_video
+            video_title = os.path.splitext(os.path.basename(existing_video))[0]
+        else:
+            with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+                try:
+                    video_info = ydl.extract_info(url, download=False)
+                    video_title = video_info['title']
+                    duration = video_info.get('duration', 0)
 
-        # Sanitize the video title for the file name
-        sanitized_title = sanitize_filename(video_title)
-        print(f"Sanitized Title: {sanitized_title}")
+                    if duration > 4 * 3600:
+                        raise ValueError("Video is too long (over 4 hours)")
 
-        # Get the current date in the format YYYYMMDD
-        current_date = datetime.now().strftime("%Y%m%d")
+                except Exception as e:
+                    raise ValueError(f"Could not fetch video info: {str(e)}")
 
-        # Create the file name with the sanitized video title and current date
-        file_name = f"{sanitized_title}_{current_date}.txt"
-        print(f"File Name: {file_name}")
+            print(f"Video Title: {video_title}")
+            sanitized_title = sanitize_filename(video_title)
+            print(f"Sanitized Title: {sanitized_title}")
 
-        # Check if the 'transcriptions' folder exists, and create it if it doesn't
-        transcriptions_folder = "transcriptions"
-        if not os.path.exists(transcriptions_folder):
-            os.makedirs(transcriptions_folder)
-            print(f"Created folder: {transcriptions_folder}")
+            for folder in ['transcriptions', 'videos']:
+                if not os.path.exists(folder):
+                    os.makedirs(folder)
+                    print(f"Created folder: {folder}")
 
-        # Create the full file path for the transcription file
-        transcription_file_path = os.path.join(transcriptions_folder, file_name)
-        print(f"Transcription File Path: {transcription_file_path}")
+            current_date = datetime.now().strftime("%Y%m%d")
+            video_file_path = os.path.join('videos', f"{sanitized_title}_{current_date}.mp4")
+            print(f"Video File Path: {video_file_path}")
 
-        # Check if the 'videos' folder exists, and create it if it doesn't
-        videos_folder = "videos"
-        if not os.path.exists(videos_folder):
-            os.makedirs(videos_folder)
-            print(f"Created folder: {videos_folder}")
+            print("Downloading video...")
+            if not download_video(url, video_file_path):
+                raise ValueError("Failed to download video")
+            print("Video downloaded successfully.")
 
-        # Create the full file path for the video file
-        video_file_path = os.path.join(videos_folder, f"{sanitized_title}_{current_date}.mp4")
-        print(f"Video File Path: {video_file_path}")
+        print("Running speaker diarization...")
+        diarization_segments = get_speaker_diarization(video_file_path)
+        print("Speaker diarization completed.")
 
-        # Download the video using yt-dlp
-        print("Downloading video...")
-        ydl_opts = {
-            'format': 'best',
-            'outtmpl': video_file_path,
-            'quiet': True,
-            'no_warnings': True
-        }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-        print("Video downloaded successfully.")
+        transcription_file_path = os.path.join('transcriptions',
+                                             f"{os.path.splitext(os.path.basename(video_file_path))[0]}.txt")
 
-        # Load the Whisper model
         model = whisper.load_model("base")
         print("Whisper model loaded.")
 
-        # Transcribe the video using Whisper
         print("Transcribing video...")
         result = model.transcribe(video_file_path)
         print("Video transcription completed.")
 
-        # Process the transcription
-        transcription = result["text"]
+        result["segments"] = assign_speakers_to_transcript(result["segments"], diarization_segments)
 
-        # Capitalize names using the regular expression pattern
-        transcription = capitalize_names(transcription)
-
-        # Capitalize names of the month and the pronoun "I"
-        transcription = re.sub(r"\b(January|February|March|April|May|June|July|August|September|October|November|December)\b", lambda x: x.group().capitalize(), transcription)
-        transcription = re.sub(r"\bi\b", "I", transcription)
-
-        # Open the file in write mode
-        with open(transcription_file_path, "w") as f:
+        with open(transcription_file_path, "w", encoding='utf-8') as f:
             f.write(f"{video_title}\n\n")
 
-            # Write segments with their timestamps
+            current_timestamp = None
+            current_speaker = None
+            current_sentence = []
+
             for segment in result["segments"]:
-                timestamp = format_timestamp(segment["start"])
                 text = segment["text"].strip()
-                f.write(f"[{timestamp}] {text}\n\n")
+                speaker = segment.get("speaker", "UNKNOWN")
+
+                if not current_timestamp:
+                    current_timestamp = segment["start"]
+                    current_speaker = speaker
+
+                if current_speaker != speaker:
+                    if current_sentence:
+                        timestamp = format_timestamp(current_timestamp)
+                        complete_sentence = ' '.join(current_sentence)
+                        f.write(f"[{timestamp}] {current_speaker}: {complete_sentence}\n\n")
+                        current_sentence = []
+                        current_timestamp = segment["start"]
+                        current_speaker = speaker
+
+                current_sentence.append(text)
+
+                if is_sentence_end(text):
+                    timestamp = format_timestamp(current_timestamp)
+                    complete_sentence = ' '.join(current_sentence)
+                    f.write(f"[{timestamp}] {current_speaker}: {complete_sentence}\n\n")
+                    current_sentence = []
+                    current_timestamp = None
+                    current_speaker = None
+
+            if current_sentence:
+                timestamp = format_timestamp(current_timestamp or result["segments"][-1]["start"])
+                complete_sentence = ' '.join(current_sentence)
+                f.write(f"[{timestamp}] {current_speaker}: {complete_sentence}\n\n")
 
         print(f"Transcription saved as {transcription_file_path}")
 
@@ -128,6 +226,13 @@ def main(url):
         traceback.print_exc()
 
 if __name__ == "__main__":
+    # Check huggingface login
+    try:
+        subprocess.run(["huggingface-cli", "whoami"], check=True, capture_output=True)
+    except subprocess.CalledProcessError:
+        print("Please login first using: huggingface-cli login")
+        exit(1)
+
     parser = argparse.ArgumentParser(description='Transcribe YouTube videos using Whisper')
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument('-u', '--url', help='Single YouTube video URL')
@@ -135,11 +240,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.url:
-        # Process single video
         print(f"Processing single video: {args.url}")
         main(args.url)
     else:
-        # Process multiple videos from file
         print(f"Processing videos from file: {args.file}")
         with open(args.file, 'r') as f:
             urls = [line.strip() for line in f if line.strip()]
